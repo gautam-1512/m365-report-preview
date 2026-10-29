@@ -291,6 +291,9 @@ button{font-family:inherit}
 .flagtile-title{font-size:13.5px;font-weight:800;color:var(--ink);line-height:1.35}
 .flagtile-sub{font-size:11.5px;color:var(--ink-3)}
 .flagtile-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:auto}
+.flagtile-cta{display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:700;color:var(--accent)}
+.flagtile-cta svg{width:13px;height:13px;flex-shrink:0}
+.flagtile:active{transform:scale(.98);background:var(--surface-2)}
 
 /* reused inside the detail popup's header \2014  same markup/classes the old
    inline-expanding card used, so the popup looks like a natural continuation */
@@ -1782,6 +1785,7 @@ function findingTileEl(f) {
     <div class="flagtile-sub">${esc(f.category)}</div>
     <div class="flagtile-foot">
       <span class="pill pill-outline flag-statuspill" data-statuspill>${status === 'open' ? 'Open' : status === 'progress' ? 'In progress' : 'Resolved'}</span>
+      <span class="flagtile-cta">View details<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
     </div>
   </button>`);
   tile.addEventListener('click', () => openFlagModal(f));
@@ -2653,10 +2657,16 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
       .then(r => r.json()).catch(() => null);
   }
 
-  /* a shared report link looks like \u2026/m365_site.html?share=<token>#report \u2014
-     the token is permanent (doesn't expire) and opens that one hub read-only,
-     with no login and no way to reach the dashboard or upload anything */
+  /* the old bare share link \u2014 \u2026/m365_site.html?share=<token>#report \u2014 is retired.
+     The backend's getShared_ always refuses now, and a visit here never grants
+     access on its own; the variable is only kept so a stray old link can be
+     recognised and answered with a clear "no access" message. */
   const shareToken = new URLSearchParams(location.search).get('share');
+
+  /* true once pullHub() resolves a session that was INVITED to someone else's
+     report (not its owner) -- the report renders, but strictly read-only, and
+     there's no dashboard/upload flow since this person doesn't own a hub. */
+  let viewerMode = false;
 
   /* fire-and-forget: called from report2.js (global scope) whenever a
      status/owner edit happens, so the backend stays in sync without the
@@ -2664,7 +2674,7 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
      file is wrapped in an IIFE and report2.js can't reach it otherwise. */
   window.M365_syncFinding = function (findingId, field, value) {
     const email = sget('email');
-    if (!email || shareToken) return; // read-only viewers never write
+    if (!email || shareToken || viewerMode) return; // read-only viewers never write
     backendPost({ action: 'setFinding', email: email, findingId: findingId, field: field, value: value });
   };
 
@@ -2698,7 +2708,7 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
     const email = sget('email');
     const emailEl = $('#gacctEmail');
     if (email) {
-      emailEl.textContent = email;
+      emailEl.textContent = email + (viewerMode ? ' · view only' : '');
       slot.innerHTML = '';
       slot.appendChild(emailEl);
       const out = document.createElement('button');
@@ -2733,7 +2743,7 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
     } else if (view === 'dashboard') {
       link('Home', () => go('home'));
     } else if (view === 'report') {
-      if (!shareToken) link('Dashboard', () => go('dashboard'));
+      if (!shareToken && !viewerMode) link('Dashboard', () => go('dashboard'));
       ['Overview', 'Priority', 'Findings', 'Roadmap'].forEach(label => {
         link(label, () => { const t = document.getElementById(label.toLowerCase()); if (t) t.scrollIntoView({ behavior: 'smooth' }); });
       });
@@ -2744,6 +2754,7 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
     opts = opts || {};
     if (VIEWS.indexOf(view) === -1) view = 'home';
     if (view === 'dashboard' && !isLoggedIn()) view = 'login';
+    if (view === 'dashboard' && viewerMode && hasReport()) view = 'report'; // invited viewers land straight on the report
     if (view === 'report' && !isLoggedIn() && !shareToken) view = 'login';
     VIEWS.forEach(v => { if (viewEls[v]) viewEls[v].hidden = (v !== view); });
     paintNav(view);
@@ -2873,8 +2884,6 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
       }
       sset('session', res.session);
       sset('email', res.email);
-      sentPanel.style.display = 'none';
-      formPanel.style.display = 'block';
       await pullHub();
       go('dashboard');
     });
@@ -2887,21 +2896,47 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
     });
   }
 
-  async function pullHub() {
-    const res = await backendPost({ action: 'getHub' });
-    if (res && res.error === 'auth') { signOutLocal(); return; }
-    if (res && res.exists && res.hasReport) {
+  async function pullHub(retry) {
+    let res = await backendPost({ action: 'getHub' });
+    if (!res) {
+      // null means the request itself failed (network hiccup, or the Apps
+      // Script backend cold-starting right after a redeploy) -- NOT "no
+      // report yet". Retry once before giving up, and if it still fails,
+      // leave whatever was already on screen alone rather than wiping a
+      // ready report back to the upload flow, which reads to the person as
+      // their report having vanished / "stuck processing".
+      if (!retry) return pullHub(true);
+      toast("Couldn't reach the report server just now — showing your last loaded view. Refresh to try again.");
+      return;
+    }
+    if (res.error === 'auth') { signOutLocal(); return; }
+    viewerMode = !!(res.role === 'viewer');
+    window.M365_READONLY = viewerMode;
+    if (res.exists && res.hasReport) {
       sset('step-download', '1');
       sset('step-upload', '1');
       if (res.updatedAt) sset('report-updated-at', res.updatedAt);
       if (res.report && typeof M365_setRealReport === 'function') M365_setRealReport(res.report);
       if (typeof M365_applyFindingState === 'function') M365_applyFindingState(res.statuses, res.owners);
+    } else {
+      sdel('step-upload'); // an invited viewer whose owner hasn't uploaded a report yet
     }
+    // on a page reload, go('dashboard') below may have already run before this
+    // resolved (we're not awaited there) -- if it left an invited viewer sitting
+    // on the dashboard, correct that now that we know their role.
+    if (viewerMode && !viewEls.dashboard.hidden) go('dashboard', { silent: true });
   }
   function signOutLocal() {
     ['session', 'email', 'step-download', 'step-upload', 'report-updated-at'].forEach(sdel);
     reassessing = false;
     if (typeof M365_clearRealReport === 'function') M365_clearRealReport();
+    // reset the login panels back to their default state (email form showing,
+    // code-entry panel hidden) for next time -- done here, off-screen, instead
+    // of in the verify-success handler, where it used to cause a visible flash
+    // of the email form right before navigating to the dashboard.
+    const fp = $('#loginFormPanel'), sp = $('#loginSent');
+    if (fp) fp.style.display = '';
+    if (sp) sp.style.display = 'none';
   }
 
   /* ---------- dashboard: hub-ready card (returning visitor) + step tracker + upload + simulated processing ---------- */
@@ -2909,11 +2944,22 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
     const email = sget('email') || '';
     const nameEl = $('#dashEmail');
     if (nameEl) nameEl.textContent = email;
-    const ready = hasReport() && !reassessing;
     const hubReady = $('#hubReady');
     const steps = $('#dashSteps');
     const backBtn = $('#backToHubBtn');
     const sub = $('#dashSub');
+    if (viewerMode) {
+      // invited viewers never see the upload flow -- either they already got
+      // bounced straight to the report (go() does that once hasReport() is
+      // true), or the owner hasn't uploaded one yet and this is all there is
+      if (hubReady) hubReady.hidden = true;
+      if (steps) steps.hidden = true;
+      if (backBtn) backBtn.hidden = true;
+      if (sub) sub.textContent = "You've been given view-only access to this report, but it isn't ready yet — check back soon.";
+      $('#procWrap').style.display = 'none';
+      return;
+    }
+    const ready = hasReport() && !reassessing;
     if (hubReady) hubReady.hidden = !ready;
     if (steps) steps.hidden = ready;
     if (backBtn) backBtn.hidden = !(hasReport() && reassessing);
@@ -3054,49 +3100,138 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
     }
   }
 
-  /* ---------- share: "Share" button in the report nav + read-only shared view ---------- */
+  /* ---------- share: invite-by-email panel in the report nav (owner only) ---------- */
   function initShare() {
     const btn = $('#shareReportBtn');
     const pill = $('#repnavPill');
     if (shareToken) {
       if (btn) btn.hidden = true;
-      if (pill) pill.textContent = 'SHARED REPORT \u2014 VIEW ONLY';
+      if (pill) pill.textContent = 'LINK DISABLED \u2014 NO ACCESS';
+      return;
+    }
+    if (viewerMode) {
+      if (btn) btn.hidden = true;
+      if (pill) pill.textContent = 'SHARED WITH YOU \u2014 VIEW ONLY';
       return;
     }
     if (!btn) return;
-    btn.addEventListener('click', async () => {
-      const email = sget('email');
-      if (!email) return;
-      if (!backendEnabled()) { toast("Link sharing needs the backend set up first \u2014 see the deployment notes."); return; }
-      const prevLabel = btn.innerHTML;
-      btn.disabled = true;
-      btn.textContent = 'Copying\u2026';
-      const state = (typeof M365_getFindingState === 'function') ? M365_getFindingState() : { statuses: {}, owners: {} };
-      const report = (typeof M365_getCurrentReport === 'function') ? M365_getCurrentReport() : null;
-      const res = await backendPost({ action: 'saveHub', email: email, hasReport: true, statuses: state.statuses, owners: state.owners, report: report });
-      btn.disabled = false;
-      btn.innerHTML = prevLabel;
-      if (!res || !res.token) { toast('Could not create a link \u2014 try again.'); return; }
-      const link = location.origin + location.pathname + '?share=' + res.token + '#report';
-      copyText(link);
+    btn.addEventListener('click', () => {
+      if (!sget('email')) return;
+      if (!backendEnabled()) { toast("Sharing needs the backend set up first \u2014 see the deployment notes."); return; }
+      openInviteModal();
     });
   }
 
-  async function initShareMode() {
-    window.M365_READONLY = true;
-    const res = await (window.__SHARED_P || backendGet('getShared', { token: shareToken }));
-    const done = () => document.documentElement.classList.remove('share-loading');
-    if (!res || res.error) {
-      done();
-      window.M365_READONLY = false;
-      go(VIEWS.indexOf(location.hash.slice(1)) !== -1 ? location.hash.slice(1) : 'home', { silent: true });
-      toast(res && res.error === 'not_ready' ? "That report isn't ready yet." : "That link isn't valid.");
-      return;
-    }
-    if (res.report && typeof M365_setRealReport === 'function') M365_setRealReport(res.report);
-    if (typeof M365_applyFindingState === 'function') M365_applyFindingState(res.statuses, res.owners);
-    go('report', { silent: true });
-    done();
+  /* someone invited by email, not a copyable link, is the only way into a report:
+     saveHub_/getShared_ on the backend refuse a bare link outright, so a stray
+     old link just gets told it has no access, with no network round-trip. */
+  function initShareMode() {
+    document.documentElement.classList.remove('share-loading');
+    toast("That link no longer grants access \u2014 ask the report owner to share it with your email instead.");
+    go(VIEWS.indexOf(location.hash.slice(1)) !== -1 ? location.hash.slice(1) : 'home', { silent: true });
+  }
+
+  /* ---------- share: invite-by-email modal ---------- */
+  let inviteModalEl = null;
+  function ensureInviteModal() {
+    if (inviteModalEl) return inviteModalEl;
+    const ov = el(`<div class="flagmodal-overlay" id="inviteModalOverlay" hidden>
+      <div class="flagmodal" role="dialog" aria-modal="true" aria-labelledby="inviteModalTitle" style="max-width:460px">
+        <button type="button" class="flagmodal-close" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+        <div class="flagmodal-head">
+          <div class="flag-main">
+            <div class="flag-title-row"><span class="flag-title" id="inviteModalTitle">Share this report</span></div>
+            <div class="flag-sub">Give someone read-only access by email \u2014 this is the only way to share this report.</div>
+          </div>
+        </div>
+        <div class="flagmodal-body">
+          <form id="inviteForm">
+            <div class="field">
+              <label for="inviteName">Name</label>
+              <input type="text" id="inviteName" placeholder="Jordan Lee" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="inviteTitle">Title</label>
+              <input type="text" id="inviteTitle" placeholder="IT Director" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="inviteEmail">Email</label>
+              <input type="email" id="inviteEmail" placeholder="name@company.com" required autocomplete="off">
+              <div class="field-err" id="inviteErr"></div>
+            </div>
+            <p class="field-note">They'll get an email explaining they've been given access, with instructions to sign in using their own email address \u2014 no password, and no link that works for anyone else.</p>
+            <button type="submit" class="btn-primary btn-primary-block">Send invite</button>
+          </form>
+          <div id="inviteList" style="margin-top:18px"></div>
+        </div>
+      </div>
+    </div>`);
+    document.body.appendChild(ov);
+    ov.addEventListener('click', e => { if (e.target === ov) closeInviteModal(); });
+    $('.flagmodal-close', ov).addEventListener('click', closeInviteModal);
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && ov.classList.contains('show')) closeInviteModal(); });
+    const form = $('#inviteForm', ov);
+    const err = $('#inviteErr', ov);
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = $('#inviteName', ov).value.trim();
+      const title = $('#inviteTitle', ov).value.trim();
+      const email = $('#inviteEmail', ov).value.trim();
+      const m = /^[^\s@]+@([^\s@]+\.[^\s@]+)$/.exec(email);
+      err.style.display = 'none';
+      if (!m) { err.textContent = 'Enter a valid email address.'; err.style.display = 'block'; return; }
+      const b = form.querySelector('button[type=submit]');
+      const prevLabel = b.textContent;
+      b.disabled = true; b.textContent = 'Sending\u2026';
+      const res = await backendPost({ action: 'inviteViewer', name: name, title: title, email: email });
+      b.disabled = false; b.textContent = prevLabel;
+      if (!res || !res.ok) {
+        const why = res && res.error;
+        err.textContent = why === 'self' ? "That's your own email address."
+          : why === 'bad_email' ? 'Enter a valid email address.'
+          : why === 'rate_limited' ? 'Too many invites sent recently \u2014 try again in a bit.'
+          : 'Could not send that invite. Please try again.';
+        err.style.display = 'block';
+        return;
+      }
+      toast('Invite sent to ' + email);
+      $('#inviteName', ov).value = ''; $('#inviteTitle', ov).value = ''; $('#inviteEmail', ov).value = '';
+      refreshInviteList(ov);
+    });
+    inviteModalEl = ov;
+    return ov;
+  }
+
+  function renderInviteList(ov, invites) {
+    const wrap = $('#inviteList', ov);
+    if (!invites || !invites.length) { wrap.innerHTML = ''; return; }
+    wrap.innerHTML = '<div class="field-note" style="margin-bottom:8px">Shared with</div>' +
+      invites.map(inv => `<div style="display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-top:1px solid var(--line);font-size:13px">
+        <span>${esc(inv.name || inv.email)}${inv.title ? ' <span style="color:var(--ink-2)">\u2014 ' + esc(inv.title) + '</span>' : ''}</span>
+        <span style="color:var(--ink-2)">${esc(inv.email)}</span>
+      </div>`).join('');
+  }
+
+  async function refreshInviteList(ov) {
+    const res = await backendPost({ action: 'listInvites' });
+    if (res && res.ok) renderInviteList(ov, res.invites);
+  }
+
+  function openInviteModal() {
+    const ov = ensureInviteModal();
+    ov.hidden = false;
+    requestAnimationFrame(() => ov.classList.add('show'));
+    document.body.style.overflow = 'hidden';
+    refreshInviteList(ov);
+    setTimeout(() => { const i = $('#inviteName', ov); if (i) i.focus(); }, 50);
+  }
+  function closeInviteModal() {
+    if (!inviteModalEl || !inviteModalEl.classList.contains('show')) return;
+    inviteModalEl.classList.remove('show');
+    document.body.style.overflow = '';
+    setTimeout(() => { if (inviteModalEl) inviteModalEl.hidden = true; }, 160);
   }
 
   /* ---------- "what we check" category grid ---------- */
