@@ -3176,6 +3176,10 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
               <input type="email" id="inviteEmail" placeholder="name@company.com" required autocomplete="off">
               <div class="field-err" id="inviteErr"></div>
             </div>
+            <div class="field">
+              <label for="inviteMessage">Message <span style="font-weight:400;color:var(--ink-3)">(optional)</span></label>
+              <textarea id="inviteMessage" rows="3" maxlength="600" placeholder="A note to include in the email, e.g. why you're sharing this with them" style="width:100%;border:1px solid var(--line-strong);background:var(--surface);border-radius:7px;padding:9px 11px;font-size:13px;color:var(--ink);font-family:inherit;resize:vertical"></textarea>
+            </div>
             <p class="field-note">They'll get an email explaining they've been given access, with instructions to sign in using their own email address \u2014 no password, and no link that works for anyone else.</p>
             <button type="submit" class="btn-primary btn-primary-block">Send invite</button>
           </form>
@@ -3194,13 +3198,14 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
       const name = $('#inviteName', ov).value.trim();
       const title = $('#inviteTitle', ov).value.trim();
       const email = $('#inviteEmail', ov).value.trim();
+      const message = $('#inviteMessage', ov).value.trim();
       const m = /^[^\s@]+@([^\s@]+\.[^\s@]+)$/.exec(email);
       err.style.display = 'none';
       if (!m) { err.textContent = 'Enter a valid email address.'; err.style.display = 'block'; return; }
       const b = form.querySelector('button[type=submit]');
       const prevLabel = b.textContent;
       b.disabled = true; b.textContent = 'Sending\u2026';
-      const res = await backendPost({ action: 'inviteViewer', name: name, title: title, email: email });
+      const res = await backendPost({ action: 'inviteViewer', name: name, title: title, email: email, message: message });
       b.disabled = false; b.textContent = prevLabel;
       if (!res || !res.ok) {
         const why = res && res.error;
@@ -3212,7 +3217,7 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
         return;
       }
       toast('Invite sent to ' + email);
-      $('#inviteName', ov).value = ''; $('#inviteTitle', ov).value = ''; $('#inviteEmail', ov).value = '';
+      $('#inviteName', ov).value = ''; $('#inviteTitle', ov).value = ''; $('#inviteEmail', ov).value = ''; $('#inviteMessage', ov).value = '';
       refreshInviteList(ov);
     });
     inviteModalEl = ov;
