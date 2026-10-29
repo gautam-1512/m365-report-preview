@@ -2663,6 +2663,11 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
      recognised and answered with a clear "no access" message. */
   const shareToken = new URLSearchParams(location.search).get('share');
 
+  /* an invite email's link carries ?invite=<their email>#login so clicking it
+     drops the recipient straight on the sign-in form with their own address
+     already filled in, instead of the marketing home page -- see initLogin(). */
+  const inviteEmailParam = new URLSearchParams(location.search).get('invite');
+
   /* true once pullHub() resolves a session that was INVITED to someone else's
      report (not its owner) -- the report renders, but strictly read-only, and
      there's no dashboard/upload flow since this person doesn't own a hub. */
@@ -2833,13 +2838,23 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
     const showErr = (el, msg) => { el.textContent = msg; el.style.display = 'block'; };
     const busy = (f, on, text) => { const b = f.querySelector('button[type=submit]'); if (on) { b.dataset.label = b.textContent; b.textContent = text; } else if (b.dataset.label) b.textContent = b.dataset.label; b.disabled = on; };
 
+    // an invite link pre-fills the invitee's own email so all they have to do
+    // is press the button below -- still editable, in case they were invited
+    // under a different address than the one they'd rather sign in with.
+    if (inviteEmailParam) input.value = inviteEmailParam;
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const val = input.value.trim();
       const m = /^[^\s@]+@([^\s@]+\.[^\s@]+)$/.exec(val);
       if (!m) return showErr(err, 'Enter a valid work email address.');
       const domain = m[1].toLowerCase();
-      if (FREE_DOMAINS.has(domain)) return showErr(err, 'Please use your company email \u2014 personal addresses like ' + domain + ' can\'t be used here.');
+      // the personal-email block is only for someone signing up as a NEW hub
+      // owner -- it never applies on an invite link, since an invited viewer
+      // can be anyone the owner chose to share with, personal address
+      // included (the backend enforces this same exception server-side).
+      const isInviteFlow = !!inviteEmailParam;
+      if (!isInviteFlow && FREE_DOMAINS.has(domain)) return showErr(err, 'Please use your company email \u2014 personal addresses like ' + domain + ' can\'t be used here.');
       err.style.display = 'none';
       busy(form, true, 'Sending\u2026');
       const res = await backendPost({ action: 'requestCode', email: val });
@@ -3366,7 +3381,12 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
     } else {
       if (isLoggedIn()) pullHub();
       const startHash = location.hash.slice(1);
-      go(VIEWS.indexOf(startHash) !== -1 ? startHash : 'home', { silent: true });
+      // an invite link (?invite=<email>) always lands on sign-in with that
+      // email pre-filled, even if a link-rewriting/safe-link service along
+      // the way dropped the #login fragment -- the query string is far more
+      // likely to survive a redirect than a fragment is.
+      const startView = (inviteEmailParam && !isLoggedIn()) ? 'login' : (VIEWS.indexOf(startHash) !== -1 ? startHash : 'home');
+      go(startView, { silent: true });
     }
   });
 })();
